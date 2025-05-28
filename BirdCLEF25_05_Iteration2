@@ -1,0 +1,1040 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "id": "ef4c4fc0",
+   "metadata": {
+    "papermill": {
+     "duration": 0.00577,
+     "end_time": "2025-05-28T07:44:17.384245",
+     "exception": false,
+     "start_time": "2025-05-28T07:44:17.378475",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "source": [
+    "# **BirdCLEF Inference 02** - Ensembles"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "id": "65018b2d",
+   "metadata": {
+    "_cell_guid": "b1076dfc-b9ad-4769-8c92-a6c4dae69d19",
+    "_uuid": "8f2839f25d086af736a60e9eeb907d3b93b6e0e5",
+    "execution": {
+     "iopub.execute_input": "2025-05-28T07:44:17.394582Z",
+     "iopub.status.busy": "2025-05-28T07:44:17.394197Z",
+     "iopub.status.idle": "2025-05-28T07:44:37.464160Z",
+     "shell.execute_reply": "2025-05-28T07:44:37.463257Z"
+    },
+    "papermill": {
+     "duration": 20.076291,
+     "end_time": "2025-05-28T07:44:37.466032",
+     "exception": false,
+     "start_time": "2025-05-28T07:44:17.389741",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [],
+   "source": [
+    "import numpy as np\n",
+    "import pandas as pd\n",
+    "import soundfile as sf \n",
+    "import torchaudio\n",
+    "import torchaudio.transforms as T\n",
+    "import torch\n",
+    "import torch.nn as nn\n",
+    "import timm\n",
+    "from pathlib import Path\n",
+    "from tqdm.notebook import tqdm\n",
+    "import os\n",
+    "import gc\n",
+    "import shutil "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "id": "71098637",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2025-05-28T07:44:37.475057Z",
+     "iopub.status.busy": "2025-05-28T07:44:37.474413Z",
+     "iopub.status.idle": "2025-05-28T07:44:37.495128Z",
+     "shell.execute_reply": "2025-05-28T07:44:37.494011Z"
+    },
+    "papermill": {
+     "duration": 0.02703,
+     "end_time": "2025-05-28T07:44:37.496609",
+     "exception": false,
+     "start_time": "2025-05-28T07:44:37.469579",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Successfully imported from utils.py\n",
+      "Using device: cpu\n"
+     ]
+    }
+   ],
+   "source": [
+    "# --- Copy utils.py ---\n",
+    "try:\n",
+    "    KAGGLE_DATASET_PATH_UTILS = \"/kaggle/input/birdclef2025-efficientnetb0-specaugment-v1/utils.py\" \n",
+    "    KAGGLE_WORKING_PATH = \"/kaggle/working/utils.py\"\n",
+    "    shutil.copyfile(KAGGLE_DATASET_PATH_UTILS, KAGGLE_WORKING_PATH)\n",
+    "    \n",
+    "    from utils import Config, BirdClefDataset, create_target_tensor, seed_everything\n",
+    "    cfg = Config()\n",
+    "    print(\"Successfully imported from utils.py\")\n",
+    "except Exception as e:\n",
+    "    print(f\"Failed to import from utils.py: {e}\")\n",
+    "    raise\n",
+    "\n",
+    "# --- Device Setup ---\n",
+    "device = torch.device(\"cuda\" if torch.cuda.is_available() else \"cpu\")\n",
+    "print(f\"Using device: {device}\")\n",
+    "\n",
+    "# --- Competition Specific Paths ---\n",
+    "COMPETITION_DATA_PATH = Path(\"/kaggle/input/birdclef-2025/\")\n",
+    "TEST_AUDIO_PATH = COMPETITION_DATA_PATH / \"test_soundscapes/\"\n",
+    "SAMPLE_SUBMISSION_PATH = COMPETITION_DATA_PATH / \"sample_submission.csv\"\n",
+    "TAXONOMY_PATH = COMPETITION_DATA_PATH / \"taxonomy.csv\"\n",
+    "\n",
+    "# --- Define Paths to your K-Fold Model Files ---\n",
+    "# Adjust dataset slug and filenames precisely\n",
+    "KAGGLE_MODEL_DATASET_PATH = Path(\"/kaggle/input/birdclef2025-efficientnetb0-specaugment-v1\")\n",
+    "MODEL_FILENAMES = [\n",
+    "    \"KFold5_SpecAug15-30_MixUp0.1_Fold1_best_auc0.9931_epoch37.pth\", \n",
+    "    \"KFold5_SpecAug15-30_MixUp0.1_Fold2_best_auc0.9942_epoch40.pth\",\n",
+    "    \"KFold5_SpecAug15-30_MixUp0.1_Fold3_best_auc0.9920_epoch27.pth\",\n",
+    "    \"KFold5_SpecAug15-30_MixUp0.1_Fold4_best_auc0.9921_epoch30.pth\",\n",
+    "    \"KFold5_SpecAug15-30_MixUp0.1_Fold5_best_auc0.9931_epoch33.pth\"\n",
+    "]\n",
+    "MODEL_PATHS = [KAGGLE_MODEL_DATASET_PATH / fname for fname in MODEL_FILENAMES]"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "id": "e55253f0",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2025-05-28T07:44:37.504192Z",
+     "iopub.status.busy": "2025-05-28T07:44:37.503862Z",
+     "iopub.status.idle": "2025-05-28T07:44:37.526511Z",
+     "shell.execute_reply": "2025-05-28T07:44:37.525579Z"
+    },
+    "papermill": {
+     "duration": 0.028161,
+     "end_time": "2025-05-28T07:44:37.528080",
+     "exception": false,
+     "start_time": "2025-05-28T07:44:37.499919",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Found 206 classes for submission. Order verified.\n"
+     ]
+    }
+   ],
+   "source": [
+    "# --- Config (from utils.cfg) ---\n",
+    "# Ensure these are correct for the models being loaded\n",
+    "cfg.TARGET_DURATION_S = 5\n",
+    "cfg.TARGET_SAMPLES = cfg.TARGET_DURATION_S * cfg.SAMPLE_RATE\n",
+    "\n",
+    "# --- Load Taxonomy and Ordered Labels ---\n",
+    "try:\n",
+    "    sample_sub_df = pd.read_csv(SAMPLE_SUBMISSION_PATH)\n",
+    "    ORDERED_LABELS = sample_sub_df.columns[1:].tolist()\n",
+    "    cfg.NUM_CLASSES = len(ORDERED_LABELS)\n",
+    "    print(f\"Found {cfg.NUM_CLASSES} classes for submission. Order verified.\")\n",
+    "except Exception as e:\n",
+    "    print(f\"Error loading taxonomy/sample submission: {e}\")\n",
+    "    raise"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 4,
+   "id": "6fa3931a",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2025-05-28T07:44:37.536191Z",
+     "iopub.status.busy": "2025-05-28T07:44:37.535855Z",
+     "iopub.status.idle": "2025-05-28T07:44:37.542294Z",
+     "shell.execute_reply": "2025-05-28T07:44:37.541395Z"
+    },
+    "papermill": {
+     "duration": 0.012491,
+     "end_time": "2025-05-28T07:44:37.543962",
+     "exception": false,
+     "start_time": "2025-05-28T07:44:37.531471",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [],
+   "source": [
+    "# Define and load model - set pretraining to False when instantiating\n",
+    "def create_adapted_efficientnet(num_classes, pretrained=True):\n",
+    "    model = timm.create_model('efficientnet_b0', pretrained=pretrained, num_classes=0)\n",
+    "    # Modify input conv\n",
+    "    original_conv_stem = model.conv_stem\n",
+    "    mean_weights = original_conv_stem.weight.data.mean(dim=1, keepdim=True)\n",
+    "    new_conv_stem = nn.Conv2d(\n",
+    "        1,\n",
+    "        original_conv_stem.out_channels,\n",
+    "        kernel_size=original_conv_stem.kernel_size,\n",
+    "        stride=original_conv_stem.stride,\n",
+    "        padding=original_conv_stem.padding,\n",
+    "        bias=(original_conv_stem.bias is not None)\n",
+    "    )\n",
+    "    new_conv_stem.weight.data = mean_weights\n",
+    "    if original_conv_stem.bias is not None:\n",
+    "        new_conv_stem.bias.data = original_conv_stem.bias.data\n",
+    "    model.conv_stem = new_conv_stem\n",
+    "    # Add new classifier\n",
+    "    num_in_features = model.num_features\n",
+    "    model.classifier = nn.Linear(num_in_features, num_classes)\n",
+    "    return model"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 5,
+   "id": "4ac3a6a7",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2025-05-28T07:44:37.551554Z",
+     "iopub.status.busy": "2025-05-28T07:44:37.551216Z",
+     "iopub.status.idle": "2025-05-28T07:44:40.094179Z",
+     "shell.execute_reply": "2025-05-28T07:44:40.092926Z"
+    },
+    "papermill": {
+     "duration": 2.548634,
+     "end_time": "2025-05-28T07:44:40.095766",
+     "exception": false,
+     "start_time": "2025-05-28T07:44:37.547132",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Loading model 1/5 from /kaggle/input/birdclef2025-efficientnetb0-specaugment-v1/KFold5_SpecAug15-30_MixUp0.1_Fold1_best_auc0.9931_epoch37.pth...\n",
+      "  Model 1 loaded and set to eval mode.\n",
+      "Loading model 2/5 from /kaggle/input/birdclef2025-efficientnetb0-specaugment-v1/KFold5_SpecAug15-30_MixUp0.1_Fold2_best_auc0.9942_epoch40.pth...\n",
+      "  Model 2 loaded and set to eval mode.\n",
+      "Loading model 3/5 from /kaggle/input/birdclef2025-efficientnetb0-specaugment-v1/KFold5_SpecAug15-30_MixUp0.1_Fold3_best_auc0.9920_epoch27.pth...\n",
+      "  Model 3 loaded and set to eval mode.\n",
+      "Loading model 4/5 from /kaggle/input/birdclef2025-efficientnetb0-specaugment-v1/KFold5_SpecAug15-30_MixUp0.1_Fold4_best_auc0.9921_epoch30.pth...\n",
+      "  Model 4 loaded and set to eval mode.\n",
+      "Loading model 5/5 from /kaggle/input/birdclef2025-efficientnetb0-specaugment-v1/KFold5_SpecAug15-30_MixUp0.1_Fold5_best_auc0.9931_epoch33.pth...\n",
+      "  Model 5 loaded and set to eval mode.\n",
+      "\n",
+      "Successfully loaded 5 models for ensembling.\n"
+     ]
+    }
+   ],
+   "source": [
+    "# Load K-Fold trained models\n",
+    "models = []\n",
+    "for i, model_path_str in enumerate(MODEL_PATHS):\n",
+    "    model_path = Path(model_path_str)\n",
+    "    print(f\"Loading model {i+1}/{len(MODEL_PATHS)} from {model_path}...\")\n",
+    "    try:\n",
+    "        model_fold = create_adapted_efficientnet(num_classes=cfg.NUM_CLASSES, pretrained=False)\n",
+    "        state_dict = torch.load(model_path, map_location=device)\n",
+    "        model_fold.load_state_dict(state_dict)\n",
+    "        model_fold.to(device)\n",
+    "        model_fold.eval() # Set to evaluation mode\n",
+    "        models.append(model_fold)\n",
+    "        print(f\"  Model {i+1} loaded and set to eval mode.\")\n",
+    "    except FileNotFoundError:\n",
+    "        print(f\"ERROR: Model file not found at {model_path}. Check path and Kaggle dataset.\")\n",
+    "        raise\n",
+    "    except Exception as e:\n",
+    "        print(f\"Error loading model {model_path}: {e}\")\n",
+    "        raise\n",
+    "\n",
+    "if len(models) != len(MODEL_PATHS):\n",
+    "    print(f\"ERROR: Expected {len(MODEL_PATHS)} models, but only loaded {len(models)}. Please check model paths and errors.\")\n",
+    "    # Potentially stop if not all models loaded\n",
+    "    raise SystemError(\"Not all models loaded for ensemble.\")\n",
+    "\n",
+    "print(f\"\\nSuccessfully loaded {len(models)} models for ensembling.\")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 6,
+   "id": "8c277df6",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2025-05-28T07:44:40.104252Z",
+     "iopub.status.busy": "2025-05-28T07:44:40.103955Z",
+     "iopub.status.idle": "2025-05-28T07:44:40.142114Z",
+     "shell.execute_reply": "2025-05-28T07:44:40.141088Z"
+    },
+    "papermill": {
+     "duration": 0.044424,
+     "end_time": "2025-05-28T07:44:40.143624",
+     "exception": false,
+     "start_time": "2025-05-28T07:44:40.099200",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Preprocessing function for test clips defined.\n"
+     ]
+    }
+   ],
+   "source": [
+    "# Initialize MelSpectrogram transforms (can be on GPU for inference)\n",
+    "mel_transform_inference = T.MelSpectrogram(\n",
+    "    sample_rate=cfg.SAMPLE_RATE, n_fft=cfg.N_FFT, hop_length=cfg.HOP_LENGTH,\n",
+    "    n_mels=cfg.N_MELS, f_min=cfg.FMIN, f_max=cfg.FMAX\n",
+    ").to(device)\n",
+    "\n",
+    "db_transform_inference = T.AmplitudeToDB(stype='power', top_db=80).to(device)\n",
+    "\n",
+    "def preprocess_test_clip(waveform_clip, target_sr=cfg.SAMPLE_RATE, target_samples=cfg.TARGET_SAMPLES):\n",
+    "    if waveform_clip.shape[1] < target_samples:\n",
+    "        padding = target_samples - waveform_clip.shape[1]\n",
+    "        waveform_clip = torch.nn.functional.pad(waveform_clip, (0, padding))\n",
+    "    elif waveform_clip.shape[1] > target_samples:\n",
+    "        waveform_clip = waveform_clip[:, :target_samples]\n",
+    "    \n",
+    "    waveform_clip = waveform_clip.to(device) # Ensure clip is on device for GPU transforms\n",
+    "    \n",
+    "    with torch.no_grad():\n",
+    "      mel_spec = mel_transform_inference(waveform_clip)\n",
+    "      mel_spec_db = db_transform_inference(mel_spec)\n",
+    "    return mel_spec_db.squeeze(0)\n",
+    "\n",
+    "print(\"Preprocessing function for test clips defined.\")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 7,
+   "id": "bb70c567",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2025-05-28T07:44:40.152213Z",
+     "iopub.status.busy": "2025-05-28T07:44:40.151850Z",
+     "iopub.status.idle": "2025-05-28T07:44:40.184572Z",
+     "shell.execute_reply": "2025-05-28T07:44:40.183548Z"
+    },
+    "papermill": {
+     "duration": 0.04133,
+     "end_time": "2025-05-28T07:44:40.188489",
+     "exception": false,
+     "start_time": "2025-05-28T07:44:40.147159",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Found 0 test soundscape files.\n",
+      "CRITICAL WARNING: No test audio files found during a Batch run. Submission will be empty or fail.\n"
+     ]
+    },
+    {
+     "data": {
+      "application/vnd.jupyter.widget-view+json": {
+       "model_id": "4293d21d85294a57bca572dc9f1a1a66",
+       "version_major": 2,
+       "version_minor": 0
+      },
+      "text/plain": [
+       "Processing Soundscapes: 0it [00:00, ?it/s]"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Inference complete. Generated 0 ensembled predictions.\n"
+     ]
+    }
+   ],
+   "source": [
+    "# Inference loop with updates to handle ensembles\n",
+    "predictions = []\n",
+    "\n",
+    "if not TEST_AUDIO_PATH.exists():\n",
+    "    print(f\"ERROR: Test audio directory not found at {TEST_AUDIO_PATH}\")\n",
+    "    print(\"This notebook expects test audio to be present for generating predictions.\")\n",
+    "    test_audio_files = []\n",
+    "else:\n",
+    "    test_audio_files = sorted(list(TEST_AUDIO_PATH.glob(\"*.ogg\")))\n",
+    "\n",
+    "print(f\"Found {len(test_audio_files)} test soundscape files.\")\n",
+    "\n",
+    "if not test_audio_files and os.environ.get(\"KAGGLE_KERNEL_RUN_TYPE\") == \"Batch\":\n",
+    "    # If it's a \"Commit & Run\" (Batch mode) and no files, this is an issue.\n",
+    "    print(\"CRITICAL WARNING: No test audio files found during a Batch run. Submission will be empty or fail.\")\n",
+    "elif not test_audio_files:\n",
+    "    print(\"No test audio files found. Submission will likely be based on sample if predictions list is empty.\")\n",
+    "\n",
+    "\n",
+    "for audio_path in tqdm(test_audio_files, desc=\"Processing Soundscapes\"):\n",
+    "    soundscape_id = audio_path.stem\n",
+    "    \n",
+    "    try:\n",
+    "        waveform, sr = torchaudio.load(audio_path)\n",
+    "        if sr != cfg.SAMPLE_RATE:\n",
+    "            resampler = T.Resample(sr, cfg.SAMPLE_RATE).to(waveform.device)\n",
+    "            waveform = resampler(waveform)\n",
+    "        if waveform.shape[0] > 1:\n",
+    "            waveform = torch.mean(waveform, dim=0, keepdim=True)\n",
+    "        \n",
+    "        num_soundscape_samples = waveform.shape[1]\n",
+    "            \n",
+    "        for i in range(num_soundscape_samples // cfg.TARGET_SAMPLES):\n",
+    "            start_sample = i * cfg.TARGET_SAMPLES\n",
+    "            end_sample = start_sample + cfg.TARGET_SAMPLES\n",
+    "            clip_waveform = waveform[:, start_sample:end_sample] # Shape [1, target_samples]\n",
+    "\n",
+    "            spectrogram = preprocess_test_clip(clip_waveform) # Shape [N_MELS, Time] on device\n",
+    "            model_input = spectrogram.unsqueeze(0).unsqueeze(0) # [1, 1, N_MELS, Time]\n",
+    "\n",
+    "            # --- Get predictions from ALL models for this clip ---\n",
+    "            all_model_probs_for_clip = []\n",
+    "            with torch.no_grad():\n",
+    "                for model_fold in models: # Iterate through your loaded models\n",
+    "                    logits = model_fold(model_input)\n",
+    "                    probabilities = torch.sigmoid(logits)\n",
+    "                    all_model_probs_for_clip.append(probabilities)\n",
+    "            \n",
+    "            # --- Average the probabilities ---\n",
+    "            # Stack probabilities along a new dimension and then mean\n",
+    "            # Each prob tensor is [1, num_classes], stacking makes [num_models, 1, num_classes]\n",
+    "            # Then mean across num_models dim\n",
+    "            if all_model_probs_for_clip:\n",
+    "                ensembled_probs_tensor = torch.stack(all_model_probs_for_clip).mean(dim=0)\n",
+    "                ensembled_probs_cpu = ensembled_probs_tensor.squeeze().cpu().numpy() # Squeeze batch, to CPU\n",
+    "            else: # Should not happen if models loaded\n",
+    "                ensembled_probs_cpu = np.zeros(cfg.NUM_CLASSES)\n",
+    "\n",
+    "\n",
+    "            end_time_seconds = (i + 1) * cfg.TARGET_DURATION_S\n",
+    "            row_id = f\"{soundscape_id}_{end_time_seconds}\"\n",
+    "            \n",
+    "            row_data = {\"row_id\": row_id}\n",
+    "            for label_idx, label_name in enumerate(ORDERED_LABELS):\n",
+    "                row_data[label_name] = ensembled_probs_cpu[label_idx]\n",
+    "            predictions.append(row_data)\n",
+    "\n",
+    "    except Exception as e:\n",
+    "        print(f\"Error processing {audio_path}: {e}\")\n",
+    "        import traceback\n",
+    "        traceback.print_exc()\n",
+    "        # Decide: skip this file or add dummy rows for its expected clips?\n",
+    "        # For now, skipping. A robust solution might add dummy rows based on sample_submission.\n",
+    "\n",
+    "print(f\"Inference complete. Generated {len(predictions)} ensembled predictions.\")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 8,
+   "id": "23b83b79",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2025-05-28T07:44:40.197707Z",
+     "iopub.status.busy": "2025-05-28T07:44:40.196853Z",
+     "iopub.status.idle": "2025-05-28T07:44:40.277999Z",
+     "shell.execute_reply": "2025-05-28T07:44:40.276810Z"
+    },
+    "papermill": {
+     "duration": 0.087574,
+     "end_time": "2025-05-28T07:44:40.279847",
+     "exception": false,
+     "start_time": "2025-05-28T07:44:40.192273",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "No predictions were generated. Using sample_submission.csv as a template for an empty submission.\n",
+      "\n",
+      "Submission DataFrame shape: (3, 207)\n",
+      "Submission DataFrame head:\n",
+      "                  row_id  1139490  1192948  1194042  126247  1346504  134933  \\\n",
+      "0   soundscape_8358733_5   0.0001   0.0001   0.0001  0.0001   0.0001  0.0001   \n",
+      "1  soundscape_8358733_10   0.0001   0.0001   0.0001  0.0001   0.0001  0.0001   \n",
+      "2  soundscape_8358733_15   0.0001   0.0001   0.0001  0.0001   0.0001  0.0001   \n",
+      "\n",
+      "   135045  1462711  1462737  ...  yebfly1  yebsee1  yecspi2  yectyr1  yehbla2  \\\n",
+      "0  0.0001   0.0001   0.0001  ...   0.0001   0.0001   0.0001   0.0001   0.0001   \n",
+      "1  0.0001   0.0001   0.0001  ...   0.0001   0.0001   0.0001   0.0001   0.0001   \n",
+      "2  0.0001   0.0001   0.0001  ...   0.0001   0.0001   0.0001   0.0001   0.0001   \n",
+      "\n",
+      "   yehcar1  yelori1  yeofly1  yercac1  ywcpar  \n",
+      "0   0.0001   0.0001   0.0001   0.0001  0.0001  \n",
+      "1   0.0001   0.0001   0.0001   0.0001  0.0001  \n",
+      "2   0.0001   0.0001   0.0001   0.0001  0.0001  \n",
+      "\n",
+      "[3 rows x 207 columns]\n",
+      "\n",
+      "submission.csv created successfully for ensembled predictions.\n"
+     ]
+    }
+   ],
+   "source": [
+    "#Create Submission File\n",
+    "if not predictions:\n",
+    "    print(\"No predictions were generated. Using sample_submission.csv as a template for an empty submission.\")\n",
+    "    submission_df = pd.read_csv(SAMPLE_SUBMISSION_PATH)\n",
+    "    # Ensure probabilities are low for a truly empty/failed prediction\n",
+    "    for col in ORDERED_LABELS:\n",
+    "        submission_df[col] = 0.0001 \n",
+    "else:\n",
+    "    submission_df = pd.DataFrame(predictions)\n",
+    "    for label_name in ORDERED_LABELS: # Ensure all columns exist\n",
+    "        if label_name not in submission_df.columns:\n",
+    "            submission_df[label_name] = 0.0 \n",
+    "    submission_df = submission_df[['row_id'] + ORDERED_LABELS] # Enforce order\n",
+    "\n",
+    "print(f\"\\nSubmission DataFrame shape: {submission_df.shape}\")\n",
+    "print(\"Submission DataFrame head:\")\n",
+    "print(submission_df.head())\n",
+    "\n",
+    "nan_check = submission_df[ORDERED_LABELS].isnull().sum().sum()\n",
+    "if nan_check > 0:\n",
+    "    print(f\"WARNING: Found {nan_check} NaN values. Filling with 0.0.\")\n",
+    "    submission_df[ORDERED_LABELS] = submission_df[ORDERED_LABELS].fillna(0.0)\n",
+    "\n",
+    "submission_df.to_csv(\"submission.csv\", index=False)\n",
+    "print(\"\\nsubmission.csv created successfully for ensembled predictions.\")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "dc7cb942",
+   "metadata": {
+    "papermill": {
+     "duration": 0.003652,
+     "end_time": "2025-05-28T07:44:40.287383",
+     "exception": false,
+     "start_time": "2025-05-28T07:44:40.283731",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [],
+   "source": []
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "e3fd63d7",
+   "metadata": {
+    "papermill": {
+     "duration": 0.003463,
+     "end_time": "2025-05-28T07:44:40.294485",
+     "exception": false,
+     "start_time": "2025-05-28T07:44:40.291022",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [],
+   "source": []
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "e10b4252",
+   "metadata": {
+    "papermill": {
+     "duration": 0.00329,
+     "end_time": "2025-05-28T07:44:40.301422",
+     "exception": false,
+     "start_time": "2025-05-28T07:44:40.298132",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [],
+   "source": []
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "b75a7f67",
+   "metadata": {
+    "papermill": {
+     "duration": 0.003246,
+     "end_time": "2025-05-28T07:44:40.308251",
+     "exception": false,
+     "start_time": "2025-05-28T07:44:40.305005",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [],
+   "source": []
+  }
+ ],
+ "metadata": {
+  "kaggle": {
+   "accelerator": "none",
+   "dataSources": [
+    {
+     "databundleVersionId": 11361821,
+     "sourceId": 91844,
+     "sourceType": "competition"
+    },
+    {
+     "databundleVersionId": 12494359,
+     "datasetId": 7492646,
+     "sourceId": 11979785,
+     "sourceType": "datasetVersion"
+    }
+   ],
+   "dockerImageVersionId": 31040,
+   "isGpuEnabled": false,
+   "isInternetEnabled": false,
+   "language": "python",
+   "sourceType": "notebook"
+  },
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.11.11"
+  },
+  "papermill": {
+   "default_parameters": {},
+   "duration": 31.164533,
+   "end_time": "2025-05-28T07:44:43.580968",
+   "environment_variables": {},
+   "exception": null,
+   "input_path": "__notebook__.ipynb",
+   "output_path": "__notebook__.ipynb",
+   "parameters": {},
+   "start_time": "2025-05-28T07:44:12.416435",
+   "version": "2.6.0"
+  },
+  "widgets": {
+   "application/vnd.jupyter.widget-state+json": {
+    "state": {
+     "15e43434d5bd42c38a3e55e7dd8fe20c": {
+      "model_module": "@jupyter-widgets/controls",
+      "model_module_version": "2.0.0",
+      "model_name": "ProgressStyleModel",
+      "state": {
+       "_model_module": "@jupyter-widgets/controls",
+       "_model_module_version": "2.0.0",
+       "_model_name": "ProgressStyleModel",
+       "_view_count": null,
+       "_view_module": "@jupyter-widgets/base",
+       "_view_module_version": "2.0.0",
+       "_view_name": "StyleView",
+       "bar_color": null,
+       "description_width": ""
+      }
+     },
+     "20ff14ecf6c84265bb7099a49542fe5c": {
+      "model_module": "@jupyter-widgets/controls",
+      "model_module_version": "2.0.0",
+      "model_name": "HTMLModel",
+      "state": {
+       "_dom_classes": [],
+       "_model_module": "@jupyter-widgets/controls",
+       "_model_module_version": "2.0.0",
+       "_model_name": "HTMLModel",
+       "_view_count": null,
+       "_view_module": "@jupyter-widgets/controls",
+       "_view_module_version": "2.0.0",
+       "_view_name": "HTMLView",
+       "description": "",
+       "description_allow_html": false,
+       "layout": "IPY_MODEL_c33329bb7fc04706ad9b10b8afac6418",
+       "placeholder": "​",
+       "style": "IPY_MODEL_a908aeb90ff446308de8a843b2af4514",
+       "tabbable": null,
+       "tooltip": null,
+       "value": " 0/0 [00:00&lt;?, ?it/s]"
+      }
+     },
+     "4293d21d85294a57bca572dc9f1a1a66": {
+      "model_module": "@jupyter-widgets/controls",
+      "model_module_version": "2.0.0",
+      "model_name": "HBoxModel",
+      "state": {
+       "_dom_classes": [],
+       "_model_module": "@jupyter-widgets/controls",
+       "_model_module_version": "2.0.0",
+       "_model_name": "HBoxModel",
+       "_view_count": null,
+       "_view_module": "@jupyter-widgets/controls",
+       "_view_module_version": "2.0.0",
+       "_view_name": "HBoxView",
+       "box_style": "",
+       "children": [
+        "IPY_MODEL_b6612a5332054545aa097e99f84d920f",
+        "IPY_MODEL_da135c48f48f421c85de4a38537f5ec2",
+        "IPY_MODEL_20ff14ecf6c84265bb7099a49542fe5c"
+       ],
+       "layout": "IPY_MODEL_6b2a1d2cc71d495c93058d2da7a99573",
+       "tabbable": null,
+       "tooltip": null
+      }
+     },
+     "5a2d2a33d40d4dfe994dc58dde31c58f": {
+      "model_module": "@jupyter-widgets/base",
+      "model_module_version": "2.0.0",
+      "model_name": "LayoutModel",
+      "state": {
+       "_model_module": "@jupyter-widgets/base",
+       "_model_module_version": "2.0.0",
+       "_model_name": "LayoutModel",
+       "_view_count": null,
+       "_view_module": "@jupyter-widgets/base",
+       "_view_module_version": "2.0.0",
+       "_view_name": "LayoutView",
+       "align_content": null,
+       "align_items": null,
+       "align_self": null,
+       "border_bottom": null,
+       "border_left": null,
+       "border_right": null,
+       "border_top": null,
+       "bottom": null,
+       "display": null,
+       "flex": null,
+       "flex_flow": null,
+       "grid_area": null,
+       "grid_auto_columns": null,
+       "grid_auto_flow": null,
+       "grid_auto_rows": null,
+       "grid_column": null,
+       "grid_gap": null,
+       "grid_row": null,
+       "grid_template_areas": null,
+       "grid_template_columns": null,
+       "grid_template_rows": null,
+       "height": null,
+       "justify_content": null,
+       "justify_items": null,
+       "left": null,
+       "margin": null,
+       "max_height": null,
+       "max_width": null,
+       "min_height": null,
+       "min_width": null,
+       "object_fit": null,
+       "object_position": null,
+       "order": null,
+       "overflow": null,
+       "padding": null,
+       "right": null,
+       "top": null,
+       "visibility": null,
+       "width": "20px"
+      }
+     },
+     "67a4de844d8e422c98d3704388d4ebff": {
+      "model_module": "@jupyter-widgets/base",
+      "model_module_version": "2.0.0",
+      "model_name": "LayoutModel",
+      "state": {
+       "_model_module": "@jupyter-widgets/base",
+       "_model_module_version": "2.0.0",
+       "_model_name": "LayoutModel",
+       "_view_count": null,
+       "_view_module": "@jupyter-widgets/base",
+       "_view_module_version": "2.0.0",
+       "_view_name": "LayoutView",
+       "align_content": null,
+       "align_items": null,
+       "align_self": null,
+       "border_bottom": null,
+       "border_left": null,
+       "border_right": null,
+       "border_top": null,
+       "bottom": null,
+       "display": null,
+       "flex": null,
+       "flex_flow": null,
+       "grid_area": null,
+       "grid_auto_columns": null,
+       "grid_auto_flow": null,
+       "grid_auto_rows": null,
+       "grid_column": null,
+       "grid_gap": null,
+       "grid_row": null,
+       "grid_template_areas": null,
+       "grid_template_columns": null,
+       "grid_template_rows": null,
+       "height": null,
+       "justify_content": null,
+       "justify_items": null,
+       "left": null,
+       "margin": null,
+       "max_height": null,
+       "max_width": null,
+       "min_height": null,
+       "min_width": null,
+       "object_fit": null,
+       "object_position": null,
+       "order": null,
+       "overflow": null,
+       "padding": null,
+       "right": null,
+       "top": null,
+       "visibility": null,
+       "width": null
+      }
+     },
+     "6b2a1d2cc71d495c93058d2da7a99573": {
+      "model_module": "@jupyter-widgets/base",
+      "model_module_version": "2.0.0",
+      "model_name": "LayoutModel",
+      "state": {
+       "_model_module": "@jupyter-widgets/base",
+       "_model_module_version": "2.0.0",
+       "_model_name": "LayoutModel",
+       "_view_count": null,
+       "_view_module": "@jupyter-widgets/base",
+       "_view_module_version": "2.0.0",
+       "_view_name": "LayoutView",
+       "align_content": null,
+       "align_items": null,
+       "align_self": null,
+       "border_bottom": null,
+       "border_left": null,
+       "border_right": null,
+       "border_top": null,
+       "bottom": null,
+       "display": null,
+       "flex": null,
+       "flex_flow": null,
+       "grid_area": null,
+       "grid_auto_columns": null,
+       "grid_auto_flow": null,
+       "grid_auto_rows": null,
+       "grid_column": null,
+       "grid_gap": null,
+       "grid_row": null,
+       "grid_template_areas": null,
+       "grid_template_columns": null,
+       "grid_template_rows": null,
+       "height": null,
+       "justify_content": null,
+       "justify_items": null,
+       "left": null,
+       "margin": null,
+       "max_height": null,
+       "max_width": null,
+       "min_height": null,
+       "min_width": null,
+       "object_fit": null,
+       "object_position": null,
+       "order": null,
+       "overflow": null,
+       "padding": null,
+       "right": null,
+       "top": null,
+       "visibility": null,
+       "width": null
+      }
+     },
+     "a0138e9331904002b609ee8a056c0e26": {
+      "model_module": "@jupyter-widgets/controls",
+      "model_module_version": "2.0.0",
+      "model_name": "HTMLStyleModel",
+      "state": {
+       "_model_module": "@jupyter-widgets/controls",
+       "_model_module_version": "2.0.0",
+       "_model_name": "HTMLStyleModel",
+       "_view_count": null,
+       "_view_module": "@jupyter-widgets/base",
+       "_view_module_version": "2.0.0",
+       "_view_name": "StyleView",
+       "background": null,
+       "description_width": "",
+       "font_size": null,
+       "text_color": null
+      }
+     },
+     "a908aeb90ff446308de8a843b2af4514": {
+      "model_module": "@jupyter-widgets/controls",
+      "model_module_version": "2.0.0",
+      "model_name": "HTMLStyleModel",
+      "state": {
+       "_model_module": "@jupyter-widgets/controls",
+       "_model_module_version": "2.0.0",
+       "_model_name": "HTMLStyleModel",
+       "_view_count": null,
+       "_view_module": "@jupyter-widgets/base",
+       "_view_module_version": "2.0.0",
+       "_view_name": "StyleView",
+       "background": null,
+       "description_width": "",
+       "font_size": null,
+       "text_color": null
+      }
+     },
+     "b6612a5332054545aa097e99f84d920f": {
+      "model_module": "@jupyter-widgets/controls",
+      "model_module_version": "2.0.0",
+      "model_name": "HTMLModel",
+      "state": {
+       "_dom_classes": [],
+       "_model_module": "@jupyter-widgets/controls",
+       "_model_module_version": "2.0.0",
+       "_model_name": "HTMLModel",
+       "_view_count": null,
+       "_view_module": "@jupyter-widgets/controls",
+       "_view_module_version": "2.0.0",
+       "_view_name": "HTMLView",
+       "description": "",
+       "description_allow_html": false,
+       "layout": "IPY_MODEL_67a4de844d8e422c98d3704388d4ebff",
+       "placeholder": "​",
+       "style": "IPY_MODEL_a0138e9331904002b609ee8a056c0e26",
+       "tabbable": null,
+       "tooltip": null,
+       "value": "Processing Soundscapes: "
+      }
+     },
+     "c33329bb7fc04706ad9b10b8afac6418": {
+      "model_module": "@jupyter-widgets/base",
+      "model_module_version": "2.0.0",
+      "model_name": "LayoutModel",
+      "state": {
+       "_model_module": "@jupyter-widgets/base",
+       "_model_module_version": "2.0.0",
+       "_model_name": "LayoutModel",
+       "_view_count": null,
+       "_view_module": "@jupyter-widgets/base",
+       "_view_module_version": "2.0.0",
+       "_view_name": "LayoutView",
+       "align_content": null,
+       "align_items": null,
+       "align_self": null,
+       "border_bottom": null,
+       "border_left": null,
+       "border_right": null,
+       "border_top": null,
+       "bottom": null,
+       "display": null,
+       "flex": null,
+       "flex_flow": null,
+       "grid_area": null,
+       "grid_auto_columns": null,
+       "grid_auto_flow": null,
+       "grid_auto_rows": null,
+       "grid_column": null,
+       "grid_gap": null,
+       "grid_row": null,
+       "grid_template_areas": null,
+       "grid_template_columns": null,
+       "grid_template_rows": null,
+       "height": null,
+       "justify_content": null,
+       "justify_items": null,
+       "left": null,
+       "margin": null,
+       "max_height": null,
+       "max_width": null,
+       "min_height": null,
+       "min_width": null,
+       "object_fit": null,
+       "object_position": null,
+       "order": null,
+       "overflow": null,
+       "padding": null,
+       "right": null,
+       "top": null,
+       "visibility": null,
+       "width": null
+      }
+     },
+     "da135c48f48f421c85de4a38537f5ec2": {
+      "model_module": "@jupyter-widgets/controls",
+      "model_module_version": "2.0.0",
+      "model_name": "FloatProgressModel",
+      "state": {
+       "_dom_classes": [],
+       "_model_module": "@jupyter-widgets/controls",
+       "_model_module_version": "2.0.0",
+       "_model_name": "FloatProgressModel",
+       "_view_count": null,
+       "_view_module": "@jupyter-widgets/controls",
+       "_view_module_version": "2.0.0",
+       "_view_name": "ProgressView",
+       "bar_style": "success",
+       "description": "",
+       "description_allow_html": false,
+       "layout": "IPY_MODEL_5a2d2a33d40d4dfe994dc58dde31c58f",
+       "max": 1.0,
+       "min": 0.0,
+       "orientation": "horizontal",
+       "style": "IPY_MODEL_15e43434d5bd42c38a3e55e7dd8fe20c",
+       "tabbable": null,
+       "tooltip": null,
+       "value": 0.0
+      }
+     }
+    },
+    "version_major": 2,
+    "version_minor": 0
+   }
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
